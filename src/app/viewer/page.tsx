@@ -107,6 +107,12 @@ export default function Viewer() {
   const [isPlayingAll, setIsPlayingAll] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(1);
 
+  // "Mark sync event" — capture each stream's current playhead the moment
+  // it reaches a shared audio/visual cue (e.g. a countdown), then derive
+  // offsets from the differences instead of tuning each one by hand.
+  const [isMarking, setIsMarking] = useState(false);
+  const [marks, setMarks] = useState<Record<number, number>>({});
+
   // Video ID per original stream index, independent of stage display order
   const videoIdsByIndex = useMemo(() => {
     const safeCount = Math.max(0, activeCount || 0);
@@ -267,6 +273,53 @@ export default function Viewer() {
   const handleSetPlaybackRate = (rate: number) => {
     syncControllerRef.current?.setPlaybackRateAll(rate);
     setPlaybackRate(rate);
+  };
+
+  // Enter/exit "mark sync event" mode. Always starts from a clean slate —
+  // stale marks from a previous attempt would silently corrupt the next one.
+  const handleToggleMarking = () => {
+    setMarks({});
+    setIsMarking((prev) => !prev);
+  };
+
+  // Record this stream's current playhead as "the shared moment". The user
+  // gets there however they like — scrubbing YouTube's own seek bar to the
+  // exact frame, or just clicking live when they hear it.
+  const handleMarkSync = (index: number) => {
+    const time = syncControllerRef.current?.getCurrentTime(index);
+    if (time === null || time === undefined) return;
+    setMarks((prev) => ({ ...prev, [index]: time }));
+  };
+
+  // Turn the captured marks into offsets: whichever marked stream has the
+  // lowest index becomes the reference (offset 0) — the choice is arbitrary,
+  // any marked stream would produce the same *relative* alignment — and
+  // every other marked stream's offset is the difference in its mark time
+  // from the reference's. Unmarked streams keep whatever offset they had.
+  const handleApplyMarks = () => {
+    const markedIndices = Object.keys(marks).map(Number);
+    if (markedIndices.length < 2) return;
+
+    const referenceIndex = Math.min(...markedIndices);
+    const referenceMarkTime = marks[referenceIndex];
+
+    const newOffsets = [...effectiveOffsets];
+    markedIndices.forEach((index) => {
+      newOffsets[index] = Math.round((marks[index] - referenceMarkTime) * 100) / 100;
+    });
+
+    const controller = syncControllerRef.current;
+    controller?.setOffsets(newOffsets);
+    controller?.alignToReference(referenceIndex, markedIndices);
+    setOffsets(newOffsets);
+
+    setMarks({});
+    setIsMarking(false);
+  };
+
+  const handleCancelMarking = () => {
+    setMarks({});
+    setIsMarking(false);
   };
 
   // Calculate optimal grid dimensions based on count (for bottom row in stage mode)
@@ -740,6 +793,14 @@ export default function Viewer() {
     return `${rounded > 0 ? "+" : ""}${rounded.toFixed(2)}s`;
   };
 
+  // "3:42" — mm:ss readout for a marked sync-event timestamp
+  const formatMarkTime = (seconds: number): string => {
+    const safeSeconds = typeof seconds === "number" && Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+    const mins = Math.floor(safeSeconds / 60);
+    const secs = Math.floor(safeSeconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
   if (!mounted) {
     return (
       <main className="h-screen w-screen bg-black flex items-center justify-center">
@@ -909,6 +970,42 @@ export default function Viewer() {
               </div>
             )}
           </div>
+          {/* Mark Sync Event — derive offsets from clicked/scrubbed-to timestamps instead of manual per-panel tuning */}
+          {isMarking ? (
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-amber-600/10 border border-amber-600/30 rounded">
+              <span className="text-xs text-amber-400 font-medium px-1">
+                Marking… ({Object.keys(marks).length})
+              </span>
+              <button
+                onClick={handleApplyMarks}
+                disabled={Object.keys(marks).length < 2}
+                className="px-2 py-1 bg-green-600/20 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed text-green-400 text-xs font-medium rounded transition-colors border border-green-600/30"
+                title={Object.keys(marks).length < 2 ? "Mark at least 2 streams first" : undefined}
+              >
+                Apply
+              </button>
+              <button
+                onClick={handleCancelMarking}
+                className="px-2 py-1 bg-neutral-700 hover:bg-neutral-600 text-white text-xs font-medium rounded transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleToggleMarking}
+              disabled={!apiReady}
+              className="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 disabled:opacity-40 disabled:cursor-not-allowed text-amber-400 text-xs font-medium rounded transition-colors border border-amber-600/30 flex items-center gap-1.5"
+              title={apiReady ? "Align streams by marking when each one reaches the same shared moment (e.g. a countdown)" : "Waiting for YouTube player to load…"}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <circle cx="12" cy="12" r="6"></circle>
+                <circle cx="12" cy="12" r="2"></circle>
+              </svg>
+              Mark Sync
+            </button>
+          )}
           <button
             onClick={handleRefresh}
             className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-medium rounded transition-colors border border-blue-600/30 flex items-center gap-1.5"
@@ -1159,6 +1256,25 @@ export default function Viewer() {
                   >
                     {effectiveActiveAudioIndex === originalIndex ? "🔊" : "🔇"}
                   </button>
+                )}
+
+                {/* Mark Sync Event — capture this stream's current playhead as the shared moment */}
+                {isMarking && isActive && (
+                  <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10">
+                    {marks[originalIndex] !== undefined ? (
+                      <span className="text-xs px-2 py-1 bg-green-600/90 text-white rounded font-medium shadow-lg">
+                        ✓ marked at {formatMarkTime(marks[originalIndex])}
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleMarkSync(originalIndex)}
+                        className="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium shadow-lg transition-colors"
+                        title="Click when (or after scrubbing to where) this stream reaches the shared moment"
+                      >
+                        🎯 Mark this moment
+                      </button>
+                    )}
+                  </div>
                 )}
 
                 {/* Manual alignment offset — nudge this stream's playhead relative to the sync reference */}

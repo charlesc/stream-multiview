@@ -166,6 +166,52 @@ export class SyncController {
     return Array.from(this.players.keys());
   }
 
+  /** Current playhead position in seconds, or null if the player isn't registered/ready. */
+  getCurrentTime(index: number): number | null {
+    const entry = this.players.get(index);
+    if (!entry?.ready) return null;
+    try {
+      return entry.player.getCurrentTime();
+    } catch (error) {
+      console.error("[sync-controller] getCurrentTime failed:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Seeks every ready player in `indices` (except `referenceIndex`) to
+   * `referenceTime + (its offset - the reference's offset)`, using the
+   * offsets currently held via `setOffsets`. Unlike the periodic drift
+   * correction, this ignores the playing/threshold gates and always seeks —
+   * meant to be called right after committing freshly-computed offsets (e.g.
+   * from a "mark the shared moment" pass) so the result is visible
+   * immediately instead of waiting for the next drift-correction tick.
+   */
+  alignToReference(referenceIndex: number, indices: number[]): void {
+    const reference = this.players.get(referenceIndex);
+    if (!reference?.ready) return;
+
+    let referenceTime: number;
+    try {
+      referenceTime = reference.player.getCurrentTime();
+    } catch (error) {
+      console.error("[sync-controller] alignToReference failed to read reference time:", error);
+      return;
+    }
+
+    const referenceOffset = this.getOffsetSeconds(referenceIndex);
+
+    indices.forEach((index) => {
+      if (index === referenceIndex) return;
+      const entry = this.players.get(index);
+      if (!entry?.ready) return;
+      safely(() => {
+        const target = Math.max(0, referenceTime + (this.getOffsetSeconds(index) - referenceOffset));
+        entry.player.seekTo(target, true);
+      });
+    });
+  }
+
   /** Loads a new video into an already-registered, ready player without recreating it. Returns false if it couldn't (caller should fall back). */
   reloadVideo(index: number, videoId: string): boolean {
     const entry = this.players.get(index);
