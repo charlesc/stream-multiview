@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# worker (Python, run locally — see worker/README.md)
+worker/.venv/
+worker/__pycache__/
+worker/.test-audio/
+*.pyc

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { extractVideoId, decodeStreamData, encodeStreamData, StreamData } from "@/lib/share-utils";
 import { SyncController, loadYouTubeIframeApi } from "@/lib/sync-controller";
+import { createAutoSyncJob, pollAutoSyncJob, JobState as AutoSyncJobState } from "@/lib/auto-sync-client";
 
 type LayoutType = "grid" | "stage";
 
@@ -52,16 +53,21 @@ export default function Viewer() {
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
   const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
+  const [showAutoSyncPanel, setShowAutoSyncPanel] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+  // Auto-detect sync: talks to a separate local Python worker (worker/server.py)
+  const [autoSyncReferenceIndex, setAutoSyncReferenceIndex] = useState(0);
+  const [autoSyncJob, setAutoSyncJob] = useState<AutoSyncJobState | null>(null);
+  const [autoSyncRunning, setAutoSyncRunning] = useState(false);
+  const [autoSyncErrorMessage, setAutoSyncErrorMessage] = useState<string | null>(null);
+  const autoSyncAbortRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     setMounted(true);
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Restore streams from shared data once on mount
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (hasRestored.current) return;
 
@@ -82,7 +88,6 @@ export default function Viewer() {
 
     hasRestored.current = true;
   }, [sharedData, setStreamUrls, setStreamCount, setColSizes, setRowSizes, setOffsets]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Redirect if no streams configured and no shared data
   useEffect(() => {
@@ -124,6 +129,21 @@ export default function Viewer() {
     if (validOffsets.length >= safeCount) return validOffsets.slice(0, safeCount);
     return [...validOffsets, ...Array(safeCount - validOffsets.length).fill(0)];
   }, [offsets, activeCount]);
+
+  // Original stream indices that have a real video ID — the only ones the
+  // auto-sync worker can be given. Request payloads/response arrays are
+  // positional within *this* filtered list, not the original index, so
+  // handlers below map back and forth via this array.
+  const autoSyncCandidateIndices = useMemo(
+    () => videoIdsByIndex.map((id, index) => ({ id, index })).filter(({ id }) => id.length > 0).map(({ index }) => index),
+    [videoIdsByIndex]
+  );
+  // Falls back to the first candidate if the selected reference stream is no
+  // longer active (derived rather than corrected via an effect, same reasoning
+  // as effectiveActiveAudioIndex above)
+  const effectiveAutoSyncReferenceIndex = autoSyncCandidateIndices.includes(autoSyncReferenceIndex)
+    ? autoSyncReferenceIndex
+    : (autoSyncCandidateIndices[0] ?? 0);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,6 +287,78 @@ export default function Viewer() {
   const handleSetPlaybackRate = (rate: number) => {
     syncControllerRef.current?.setPlaybackRateAll(rate);
     setPlaybackRate(rate);
+  };
+
+  // Kicks off a job on the local auto-sync worker and polls it to
+  // completion. videoIds/referenceIndex sent to the worker are positional
+  // within autoSyncCandidateIndices, not the original stream index — see
+  // that memo's comment.
+  const handleStartAutoSync = async () => {
+    setAutoSyncErrorMessage(null);
+    setAutoSyncJob(null);
+
+    const indices = autoSyncCandidateIndices;
+    const referencePosition = indices.indexOf(effectiveAutoSyncReferenceIndex);
+    if (indices.length < 2 || referencePosition === -1) {
+      setAutoSyncErrorMessage("Need at least 2 streams with a valid video loaded, including the reference.");
+      return;
+    }
+
+    setAutoSyncRunning(true);
+    const controller = new AbortController();
+    autoSyncAbortRef.current = controller;
+
+    try {
+      const videoIds = indices.map((i) => videoIdsByIndex[i]);
+      const jobId = await createAutoSyncJob(videoIds, referencePosition);
+      const finalState = await pollAutoSyncJob(jobId, setAutoSyncJob, controller.signal);
+      setAutoSyncJob(finalState);
+    } catch (err) {
+      setAutoSyncErrorMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAutoSyncRunning(false);
+    }
+  };
+
+  const handleCancelAutoSync = () => {
+    // Stops this tab from polling further — the worker keeps running the
+    // job server-side regardless (it has no cancel endpoint), which is
+    // harmless: it just finishes in the background with nothing left
+    // listening for the result.
+    autoSyncAbortRef.current?.abort();
+    setAutoSyncRunning(false);
+  };
+
+  // Writes the worker's result into the same offsets/share-URL machinery
+  // manual per-stream offsets already use — auto-detection is just another
+  // source of offsets, not a separate system. Only indices the worker was
+  // actually confident about get applied; everything else keeps whatever
+  // offset it already had (0 or a previous manual/auto value).
+  const handleApplyAutoSync = () => {
+    if (!autoSyncJob?.offsets) return;
+
+    const indices = autoSyncCandidateIndices;
+    const newOffsets = [...effectiveOffsets];
+    const appliedOriginalIndices: number[] = [];
+
+    autoSyncJob.offsets.forEach((offset, position) => {
+      if (offset === null) return;
+      const originalIndex = indices[position];
+      if (originalIndex === undefined) return;
+      newOffsets[originalIndex] = Math.round(offset * 100) / 100;
+      if (position !== autoSyncJob.referenceIndex) appliedOriginalIndices.push(originalIndex);
+    });
+
+    const syncController = syncControllerRef.current;
+    syncController?.setOffsets(newOffsets);
+    const referenceOriginalIndex = indices[autoSyncJob.referenceIndex];
+    if (referenceOriginalIndex !== undefined && appliedOriginalIndices.length > 0) {
+      syncController?.alignToReference(referenceOriginalIndex, appliedOriginalIndices);
+    }
+    setOffsets(newOffsets);
+
+    setShowAutoSyncPanel(false);
+    setAutoSyncJob(null);
   };
 
   // Calculate optimal grid dimensions based on count (for bottom row in stage mode)
@@ -906,6 +998,143 @@ export default function Viewer() {
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+          </div>
+          {/* Auto-Detect Sync — talks to the local worker/server.py process */}
+          <div className="relative">
+            <button
+              onClick={() => setShowAutoSyncPanel(!showAutoSyncPanel)}
+              className="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-400 text-xs font-medium rounded transition-colors border border-amber-600/30 flex items-center gap-1.5"
+              title="Automatically detect alignment from shared audio (experimental — requires the local worker)"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 18V5l12-2v13"></path>
+                <circle cx="6" cy="18" r="3"></circle>
+                <circle cx="18" cy="16" r="3"></circle>
+              </svg>
+              Auto Detect
+            </button>
+            {showAutoSyncPanel && (
+              <div className="absolute right-0 top-full mt-2 w-80 bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl z-50 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-white">Auto-Detect Sync</span>
+                  <span className="text-[9px] px-1.5 py-0.5 bg-amber-600/20 text-amber-400 rounded">EXPERIMENTAL</span>
+                </div>
+
+                {!autoSyncRunning && !autoSyncJob && (
+                  <>
+                    <p className="text-[10px] text-neutral-500 mb-2">
+                      Downloads each stream&apos;s audio and finds a shared moment automatically.
+                      Requires the local worker (<code className="text-neutral-400">python3 worker/server.py</code>) to be running.
+                    </p>
+                    <div className="text-[10px] text-neutral-400 mb-1.5">Reference stream</div>
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {autoSyncCandidateIndices.map((index) => (
+                        <button
+                          key={index}
+                          onClick={() => setAutoSyncReferenceIndex(index)}
+                          className={`px-2 py-1 text-xs rounded transition-colors ${
+                            effectiveAutoSyncReferenceIndex === index
+                              ? "bg-amber-600/30 text-amber-300 border border-amber-600/50"
+                              : "bg-neutral-700 hover:bg-neutral-600 text-white"
+                          }`}
+                        >
+                          {index + 1}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={handleStartAutoSync}
+                      disabled={autoSyncCandidateIndices.length < 2}
+                      className="w-full px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium rounded transition-colors"
+                    >
+                      {autoSyncCandidateIndices.length < 2 ? "Need 2+ streams loaded" : "Start Detection"}
+                    </button>
+                  </>
+                )}
+
+                {autoSyncRunning && (
+                  <div className="text-center py-2">
+                    <div className="text-xs text-amber-400 mb-2">{autoSyncJob?.progress || "Starting…"}</div>
+                    <div className="text-[10px] text-neutral-500 mb-3">This can take a minute or more for longer videos.</div>
+                    <button
+                      onClick={handleCancelAutoSync}
+                      className="px-3 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs font-medium rounded transition-colors"
+                    >
+                      Stop watching (worker keeps running)
+                    </button>
+                  </div>
+                )}
+
+                {!autoSyncRunning && autoSyncJob?.status === "done" && (
+                  <>
+                    <div className="space-y-1.5 mb-3">
+                      {autoSyncCandidateIndices.map((originalIndex, position) => {
+                        const offset = autoSyncJob.offsets?.[position] ?? null;
+                        const confidence = autoSyncJob.confidences?.[position] ?? null;
+                        const isReference = position === autoSyncJob.referenceIndex;
+                        return (
+                          <div key={originalIndex} className="flex items-center justify-between text-xs bg-neutral-900 rounded px-2 py-1.5">
+                            <span className="text-neutral-300">Stream {originalIndex + 1}{isReference ? " (reference)" : ""}</span>
+                            {isReference ? (
+                              <span className="text-neutral-500">baseline</span>
+                            ) : offset !== null ? (
+                              <span className="text-green-400">{formatOffset(offset)} · z={confidence?.toFixed(1)}</span>
+                            ) : (
+                              <span className="text-red-400" title={confidence !== null ? `z=${confidence.toFixed(1)}, below confidence threshold` : undefined}>
+                                not confident
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={handleApplyAutoSync}
+                        disabled={!autoSyncJob.offsets?.some((o, i) => o !== null && i !== autoSyncJob.referenceIndex)}
+                        className="flex-1 px-3 py-1.5 bg-green-600/20 hover:bg-green-600/30 disabled:opacity-40 disabled:cursor-not-allowed text-green-400 text-xs font-medium rounded transition-colors border border-green-600/30"
+                      >
+                        Apply confident offsets
+                      </button>
+                      <button
+                        onClick={() => { setAutoSyncJob(null); setShowAutoSyncPanel(false); }}
+                        className="px-3 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs font-medium rounded transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {!autoSyncRunning && autoSyncJob?.status === "error" && (
+                  <>
+                    <div className="text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded px-2 py-1.5 mb-2">
+                      {autoSyncJob.error || "Detection failed."}
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={handleStartAutoSync}
+                        className="flex-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium rounded transition-colors"
+                      >
+                        Try Again
+                      </button>
+                      <button
+                        onClick={() => { setAutoSyncJob(null); setShowAutoSyncPanel(false); }}
+                        className="px-3 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs font-medium rounded transition-colors"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {autoSyncErrorMessage && (
+                  <div className="text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded px-2 py-1.5 mt-2">
+                    {autoSyncErrorMessage}
+                  </div>
+                )}
               </div>
             )}
           </div>
