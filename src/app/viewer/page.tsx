@@ -1197,15 +1197,23 @@ export default function Viewer() {
                   )}
                 </div>
 
-                {/* Audio source selector — exactly one stream may be unmuted at a time */}
+                {/*
+                  Audio source selector — exactly one stream may be unmuted at
+                  a time. Solid background/border, no default-dimmed opacity —
+                  same reasoning as the offset-row buttons below: a
+                  translucent low-opacity control can wash out to invisible
+                  against bright video content, which is what made this look
+                  "missing" against certain footage even though it was still
+                  there and still clickable.
+                */}
                 {isActive && (
                   <button
                     onClick={() => toggleAudioSource(originalIndex)}
                     disabled={!apiReady}
-                    className={`absolute top-2 right-2 text-xs px-1.5 py-1 rounded transition-all drop-shadow-lg disabled:cursor-not-allowed ${
+                    className={`absolute top-2 right-2 text-sm font-medium px-2 py-1.5 rounded border transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                       effectiveActiveAudioIndex === originalIndex
-                        ? "text-green-400 opacity-100"
-                        : "text-neutral-300 opacity-50 hover:opacity-100"
+                        ? "bg-green-900/90 text-green-300 border-green-600/70 hover:bg-green-800"
+                        : "bg-neutral-800/95 text-neutral-200 border-neutral-600 hover:bg-neutral-700"
                     }`}
                     title={
                       effectiveActiveAudioIndex === originalIndex
