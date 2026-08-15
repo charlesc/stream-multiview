@@ -1155,6 +1155,24 @@ export default function Viewer() {
                   </div>
                 )}
 
+                {/*
+                  Click shield — YouTube's own "paused/not yet playing" overlay
+                  (giant center play button, share/watch-later icons, a related-
+                  video thumbnail, the "更多影片"/YouTube-logo link) is NOT
+                  something controls=0 removes, and there's no param that does:
+                  YouTube's embed terms require that overlay stay visible and
+                  clickable, so it can't legitimately be hidden. This plain,
+                  empty div sits on top of the iframe (but below the panel's own
+                  controls, which render after it below and so stack above it)
+                  and simply intercepts every click before it reaches YouTube's
+                  UI — the overlay is still there and still rendered, just
+                  inert, which keeps this compliant with YouTube's terms while
+                  still fully solving the misclick problem. All playback control
+                  already goes through this app's own header/offset-row buttons
+                  anyway, so there's no legitimate click this is taking away.
+                */}
+                {isActive && <div className="absolute inset-0" />}
+
                 {/* Stream Label */}
                 <div className="absolute top-2 left-2 px-2 py-1 flex items-center gap-2">
                   <span className="text-xs font-medium text-white drop-shadow-lg">
@@ -1199,70 +1217,77 @@ export default function Viewer() {
                   </button>
                 )}
 
-                {/* Custom playback-time readout — YouTube's own is hidden (controls=0 in getEmbedUrl) to remove misclick-prone controls */}
+                {/*
+                  Playback time + manual alignment offset, grouped into one
+                  cluster (time sits directly above the seconds buttons it
+                  describes, rather than off in its own corner) with solid
+                  (not translucent) backgrounds and full-strength white/light
+                  text throughout — a video frame behind low-opacity dark
+                  buttons can wash out contrast to the point of being
+                  unreadable, so this deliberately doesn't fade until hover
+                  the way the label/audio-source controls elsewhere do.
+                */}
                 {isActive && (
-                  <span
-                    ref={(el) => { timeDisplayRefs.current[originalIndex] = el; }}
-                    className="absolute bottom-2 right-2 text-xs text-neutral-300 tabular-nums drop-shadow-lg pointer-events-none"
-                  />
-                )}
-
-                {/* Manual alignment offset — nudge this stream's playhead relative to the sync reference */}
-                {isActive && (
-                  <div className="absolute bottom-2 left-2 flex items-center gap-1 text-neutral-300 opacity-60 hover:opacity-100 transition-opacity drop-shadow-lg">
-                    <button
-                      onClick={() => adjustOffset(originalIndex, -1)}
-                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
-                      title="Shift 1 second earlier"
-                    >
-                      −1s
-                    </button>
-                    <button
-                      onClick={() => adjustOffset(originalIndex, -0.1)}
-                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
-                      title="Shift 0.1 second earlier"
-                    >
-                      −.1
-                    </button>
-                    <button
-                      onClick={() => adjustOffset(originalIndex, -0.01)}
-                      className="px-1 py-1 text-[10px] bg-black/50 hover:bg-black/70 rounded"
-                      title="Shift 0.01 second earlier"
-                    >
-                      −.01
-                    </button>
-                    <span className="px-1 min-w-[3.5em] text-center text-[10px] tabular-nums">
-                      {formatOffset(effectiveOffsets[originalIndex] ?? 0)}
-                    </span>
-                    <button
-                      onClick={() => adjustOffset(originalIndex, 0.01)}
-                      className="px-1 py-1 text-[10px] bg-black/50 hover:bg-black/70 rounded"
-                      title="Shift 0.01 second later"
-                    >
-                      +.01
-                    </button>
-                    <button
-                      onClick={() => adjustOffset(originalIndex, 0.1)}
-                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
-                      title="Shift 0.1 second later"
-                    >
-                      +.1
-                    </button>
-                    <button
-                      onClick={() => adjustOffset(originalIndex, 1)}
-                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
-                      title="Shift 1 second later"
-                    >
-                      +1s
-                    </button>
-                    <button
-                      onClick={() => handleUseAsBaseline(originalIndex)}
-                      disabled={(effectiveOffsets[originalIndex] ?? 0) === 0}
-                      className="px-1.5 py-1.5 text-[10px] bg-purple-900/50 hover:bg-purple-700/70 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded"
-                      title="Use this stream's current position as the baseline (rebases every offset — doesn't move any playback)"
-                    >
-                      Base
-                    </button>
+                  <div className="absolute bottom-2 left-2 flex flex-col items-start gap-1">
+                    <span
+                      ref={(el) => { timeDisplayRefs.current[originalIndex] = el; }}
+                      className="text-sm font-medium text-white tabular-nums bg-neutral-900/90 px-2 py-1 rounded"
+                    />
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => adjustOffset(originalIndex, -1)}
+                        className="px-3 py-2 text-sm font-medium text-white bg-neutral-800/95 hover:bg-neutral-700 border border-neutral-600 rounded"
+                        title="Shift 1 second earlier"
+                      >
+                        −1s
+                      </button>
+                      <button
+                        onClick={() => adjustOffset(originalIndex, -0.1)}
+                        className="px-3 py-2 text-sm font-medium text-white bg-neutral-800/95 hover:bg-neutral-700 border border-neutral-600 rounded"
+                        title="Shift 0.1 second earlier"
+                      >
+                        −.1
+                      </button>
+                      <button
+                        onClick={() => adjustOffset(originalIndex, -0.01)}
+                        className="px-1.5 py-2 text-xs text-neutral-200 bg-neutral-800/95 hover:bg-neutral-700 border border-neutral-600 rounded"
+                        title="Shift 0.01 second earlier"
+                      >
+                        −.01
+                      </button>
+                      <span className="px-1 min-w-[3.5em] text-center text-xs text-neutral-200 tabular-nums">
+                        {formatOffset(effectiveOffsets[originalIndex] ?? 0)}
+                      </span>
+                      <button
+                        onClick={() => adjustOffset(originalIndex, 0.01)}
+                        className="px-1.5 py-2 text-xs text-neutral-200 bg-neutral-800/95 hover:bg-neutral-700 border border-neutral-600 rounded"
+                        title="Shift 0.01 second later"
+                      >
+                        +.01
+                      </button>
+                      <button
+                        onClick={() => adjustOffset(originalIndex, 0.1)}
+                        className="px-3 py-2 text-sm font-medium text-white bg-neutral-800/95 hover:bg-neutral-700 border border-neutral-600 rounded"
+                        title="Shift 0.1 second later"
+                      >
+                        +.1
+                      </button>
+                      <button
+                        onClick={() => adjustOffset(originalIndex, 1)}
+                        className="px-3 py-2 text-sm font-medium text-white bg-neutral-800/95 hover:bg-neutral-700 border border-neutral-600 rounded"
+                        title="Shift 1 second later"
+                      >
+                        +1s
+                      </button>
+                      <button
+                        onClick={() => handleUseAsBaseline(originalIndex)}
+                        disabled={(effectiveOffsets[originalIndex] ?? 0) === 0}
+                        className="px-2 py-2 text-xs font-medium text-purple-200 bg-purple-900/90 hover:bg-purple-700 border border-purple-600/70 disabled:opacity-40 disabled:cursor-not-allowed rounded"
+                        title="Use this stream's current position as the baseline (rebases every offset — doesn't move any playback)"
+                      >
+                        Base
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
