@@ -16,6 +16,8 @@ export interface YTPlayer {
   mute(): void;
   unMute(): void;
   isMuted(): boolean;
+  setPlaybackRate(suggestedRate: number): void;
+  getPlaybackRate(): number;
   loadVideoById(videoId: string, startSeconds?: number): void;
   destroy(): void;
 }
@@ -105,6 +107,8 @@ export class SyncController {
   private players = new Map<number, PlayerEntry>();
   private driftTimer: ReturnType<typeof setInterval> | null = null;
   private activeAudioIndex: number | null = null;
+  /** Applied to every player — new ones on ready, existing ones via setPlaybackRateAll. YouTube only accepts discrete rates (0.25/0.5/0.75/1/1.25/...), not arbitrary values. */
+  private playbackRate: number = 1;
   /** Seconds each index's playhead should lead the reference player by. Missing indices default to 0. */
   private offsets: number[] = [];
 
@@ -135,6 +139,7 @@ export class SyncController {
             if (this.activeAudioIndex === index) event.target.unMute();
             else event.target.mute();
           });
+          safely(() => event.target.setPlaybackRate(this.playbackRate));
         },
       },
     });
@@ -166,6 +171,8 @@ export class SyncController {
     const entry = this.players.get(index);
     if (!entry || !entry.ready) return false;
     safely(() => entry.player.loadVideoById(videoId, 0));
+    // loadVideoById resets the player to the default 1x rate — reapply ours
+    safely(() => entry.player.setPlaybackRate(this.playbackRate));
     entry.videoId = videoId;
     return true;
   }
@@ -190,6 +197,20 @@ export class SyncController {
         const target = Math.max(0, entry.player.getCurrentTime() + deltaSeconds);
         entry.player.seekTo(target, true);
       });
+    });
+  }
+
+  /**
+   * Sets the playback rate on every ready player and remembers it so a
+   * player that becomes ready later (or reloads a video) picks it up too.
+   * YouTube only honors values from `player.getAvailablePlaybackRates()`
+   * (typically 0.25/0.5/0.75/1/1.25/1.5/1.75/2) — passing anything else is
+   * silently ignored by the API, so callers should stick to those.
+   */
+  setPlaybackRateAll(rate: number): void {
+    this.playbackRate = rate;
+    this.players.forEach((entry) => {
+      if (entry.ready) safely(() => entry.player.setPlaybackRate(rate));
     });
   }
 

@@ -51,6 +51,7 @@ export default function Viewer() {
   );
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
+  const [showPlaybackMenu, setShowPlaybackMenu] = useState(false);
   const [copied, setCopied] = useState(false);
 
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -104,6 +105,7 @@ export default function Viewer() {
   const [apiReady, setApiReady] = useState(false);
   const [activeAudioIndex, setActiveAudioIndex] = useState<number | null>(null);
   const [isPlayingAll, setIsPlayingAll] = useState(true);
+  const [playbackRate, setPlaybackRate] = useState(1);
 
   // Video ID per original stream index, independent of stage display order
   const videoIdsByIndex = useMemo(() => {
@@ -254,6 +256,17 @@ export default function Viewer() {
       controller.playAll();
     }
     setIsPlayingAll((prev) => !prev);
+  };
+
+  // Seek every stream by the same delta (±1s / ±5s "skip" buttons)
+  const handleSeekAll = (deltaSeconds: number) => {
+    syncControllerRef.current?.seekAllBy(deltaSeconds);
+  };
+
+  // Set playback speed on every stream (0.5x / 0.75x / 1x)
+  const handleSetPlaybackRate = (rate: number) => {
+    syncControllerRef.current?.setPlaybackRateAll(rate);
+    setPlaybackRate(rate);
   };
 
   // Calculate optimal grid dimensions based on count (for bottom row in stage mode)
@@ -826,6 +839,76 @@ export default function Viewer() {
             )}
             {isPlayingAll ? "Pause All" : "Play All"}
           </button>
+          {/* Global Seek + Speed */}
+          <div className="relative">
+            <button
+              onClick={() => setShowPlaybackMenu(!showPlaybackMenu)}
+              disabled={!apiReady}
+              className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium rounded transition-colors flex items-center gap-1.5"
+              title={apiReady ? undefined : "Waiting for YouTube player to load…"}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <polyline points="12 7 12 12 15 15"></polyline>
+              </svg>
+              {playbackRate === 1 ? "Speed" : `${playbackRate}x`}
+            </button>
+            {showPlaybackMenu && (
+              <div className="absolute right-0 top-full mt-2 w-56 bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl z-50 p-3">
+                <div className="text-[10px] font-medium text-neutral-400 uppercase tracking-wide mb-1.5">
+                  Seek all streams
+                </div>
+                <div className="grid grid-cols-4 gap-1.5 mb-3">
+                  <button
+                    onClick={() => handleSeekAll(-5)}
+                    className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs rounded transition-colors"
+                    title="Rewind all streams 5 seconds"
+                  >
+                    −5s
+                  </button>
+                  <button
+                    onClick={() => handleSeekAll(-1)}
+                    className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs rounded transition-colors"
+                    title="Rewind all streams 1 second"
+                  >
+                    −1s
+                  </button>
+                  <button
+                    onClick={() => handleSeekAll(1)}
+                    className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs rounded transition-colors"
+                    title="Fast-forward all streams 1 second"
+                  >
+                    +1s
+                  </button>
+                  <button
+                    onClick={() => handleSeekAll(5)}
+                    className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-white text-xs rounded transition-colors"
+                    title="Fast-forward all streams 5 seconds"
+                  >
+                    +5s
+                  </button>
+                </div>
+                <div className="text-[10px] font-medium text-neutral-400 uppercase tracking-wide mb-1.5">
+                  Playback speed
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[0.5, 0.75, 1].map((rate) => (
+                    <button
+                      key={rate}
+                      onClick={() => handleSetPlaybackRate(rate)}
+                      className={`px-2 py-1.5 text-xs rounded transition-colors ${
+                        playbackRate === rate
+                          ? "bg-indigo-600/30 text-indigo-300 border border-indigo-600/50"
+                          : "bg-neutral-700 hover:bg-neutral-600 text-white"
+                      }`}
+                    >
+                      {rate}x
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           <button
             onClick={handleRefresh}
             className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-medium rounded transition-colors border border-blue-600/30 flex items-center gap-1.5"
