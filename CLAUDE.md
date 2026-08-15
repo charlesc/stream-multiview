@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **You are on `feat/auto-audio-sync-worker`.** This branch adds a local-only automatic audio-sync feature (`worker/`) on top of the app and is deliberately never merged into `main` — see "Auto-detect sync" below for why, and `main`'s own CLAUDE.md for the pointer back. If you're working on the app in general (not this specific feature), you probably want `main` instead.
+
 ## What this is
 
 Stream MultiView — a Next.js 16 / React 19 app that lets a user watch up to 12 YouTube live streams at once in a security-camera-style grid, with draggable panel resizing and a "Stage" (spotlight + grid) layout mode. There is no backend, database, or API route — everything runs client-side; the only "server" logic is Next.js rendering the two pages.
@@ -82,6 +84,26 @@ A fully automated alternative to manual/click-to-mark offsets: given a reference
 - **`worker/server.py`** — an in-memory job queue (`POST /jobs` → `{jobId}`, `GET /jobs/{jobId}` polled every 2s by the frontend). A job whose alignment doesn't clear `align.CONFIDENCE_THRESHOLD` comes back with `offsets[i] = null`, not a guess — `handleApplyAutoSync` in the viewer only ever applies non-null offsets, leaving the rest exactly as they were (0, or whatever manual/previous value they already had). A confidently-wrong offset is worse than an honestly-failed one; don't change this to "apply the best guess anyway."
 - Applying results calls `SyncController.alignToReference(referenceIndex, indices)` (same immediate-seek-don't-wait-for-drift-correction pattern as `nudgePlayer`, generalized to a batch of streams) so the newly-detected alignment is visible immediately rather than only converging on the next 5s drift-correction tick.
 - Request/response arrays are positional within the *filtered* list of streams that actually have a video loaded (`autoSyncCandidateIndices` in the viewer), not the original stream index — handlers map back and forth via that array. Don't assume `job.offsets[i]` corresponds to original stream index `i`.
+
+**This feature lives only on this branch (`feat/auto-audio-sync-worker`) and is intentionally never merged into `main`** — see that branch's own note in `main`'s CLAUDE.md for why. `main` gets ongoing app updates independent of this branch; rebase/cherry-pick from `main` into this branch as needed rather than the other way around, so the worker stays a self-contained add-on rather than a fork that drifts.
+
+#### Running it locally
+
+Two separate processes, both from the repo root:
+
+```bash
+# Terminal 1 — the worker (leave running; only needs a restart after editing worker/*.py)
+cd worker
+python3 -m venv .venv && source .venv/bin/activate   # first time only
+pip install -r requirements.txt                       # first time only
+python3 server.py                                     # → http://localhost:8787
+
+# Terminal 2 — the app
+bun install    # first time only
+bun dev        # → http://localhost:3000
+```
+
+Also needs `ffmpeg` and `yt-dlp` on `PATH` (`brew install ffmpeg`, `pip install -U yt-dlp` or `brew install yt-dlp`). Open the app, start some streams, and the header's "Auto Detect" button talks to the worker at `http://localhost:8787` by default (override with `NEXT_PUBLIC_SYNC_WORKER_URL` if you changed the port). See `worker/README.md` for the full setup/precondition/limitations writeup.
 
 ## Conventions
 
