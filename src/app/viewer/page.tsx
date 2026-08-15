@@ -4,6 +4,7 @@ import { useStreams } from "@/lib/stream-context";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { extractVideoId, decodeStreamData, encodeStreamData, StreamData } from "@/lib/share-utils";
+import { SyncController, loadYouTubeIframeApi } from "@/lib/sync-controller";
 
 type LayoutType = "grid" | "stage";
 
@@ -11,7 +12,7 @@ type LayoutType = "grid" | "stage";
 // Always returns valid StreamData with defaults
 function parseSharedDataFromUrl(): StreamData {
   if (typeof window === "undefined") {
-    return { videoIds: [], colSizes: [], rowSizes: [], layout: "grid", stageIndex: 0 };
+    return { videoIds: [], colSizes: [], rowSizes: [], offsets: [], layout: "grid", stageIndex: 0 };
   }
   const params = new URLSearchParams(window.location.search);
   const encodedData = params.get("data") || "";
@@ -35,6 +36,10 @@ export default function Viewer() {
   );
   const [rowSizes, setRowSizes] = useState<number[]>(() =>
     sharedData.rowSizes.length > 0 ? [...sharedData.rowSizes] : []
+  );
+  // Manual per-stream alignment offset in seconds, indexed by original stream index (not display position)
+  const [offsets, setOffsets] = useState<number[]>(() =>
+    sharedData.offsets.length > 0 ? [...sharedData.offsets] : []
   );
   const [layout, setLayout] = useState<LayoutType>(() =>
     sharedData.layout === "stage" ? "stage" : "grid"
@@ -71,10 +76,11 @@ export default function Viewer() {
       setStageIndex(sharedData.stageIndex);
       if (sharedData.colSizes.length > 0) setColSizes(sharedData.colSizes);
       if (sharedData.rowSizes.length > 0) setRowSizes(sharedData.rowSizes);
+      if (sharedData.offsets.length > 0) setOffsets(sharedData.offsets);
     }
 
     hasRestored.current = true;
-  }, [sharedData, setStreamUrls, setStreamCount, setColSizes, setRowSizes]);
+  }, [sharedData, setStreamUrls, setStreamCount, setColSizes, setRowSizes, setOffsets]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Redirect if no streams configured and no shared data
@@ -89,6 +95,166 @@ export default function Viewer() {
   // Calculate number of active streams
   const activeUrls = streamUrls.filter((url) => typeof url === "string" && url.trim() !== "");
   const activeCount = Math.max(activeUrls.length, streamCount || 0);
+
+  // --- Sync controller: unified play/pause, single audio source, drift correction ---
+  const syncControllerRef = useRef<SyncController | null>(null);
+  if (syncControllerRef.current === null) {
+    syncControllerRef.current = new SyncController();
+  }
+  const [apiReady, setApiReady] = useState(false);
+  const [activeAudioIndex, setActiveAudioIndex] = useState<number | null>(null);
+  const [isPlayingAll, setIsPlayingAll] = useState(true);
+
+  // Video ID per original stream index, independent of stage display order
+  const videoIdsByIndex = useMemo(() => {
+    const safeCount = Math.max(0, activeCount || 0);
+    return Array.from({ length: safeCount }, (_, i) => extractVideoId(streamUrls[i] || ""));
+  }, [streamUrls, activeCount]);
+
+  // Manual offset per original stream index, padded/trimmed to match the
+  // active stream count — a shared link missing or short on offsets (e.g.
+  // one made before this feature existed) just means everyone defaults to 0
+  const effectiveOffsets = useMemo(() => {
+    const safeCount = Math.max(0, activeCount || 0);
+    const safeOffsets = Array.isArray(offsets) ? offsets : [];
+    const validOffsets = safeOffsets.filter((o) => typeof o === "number" && Number.isFinite(o));
+
+    if (validOffsets.length >= safeCount) return validOffsets.slice(0, safeCount);
+    return [...validOffsets, ...Array(safeCount - validOffsets.length).fill(0)];
+  }, [offsets, activeCount]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadYouTubeIframeApi().then(() => {
+      if (!cancelled) setApiReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Create/reload/destroy YT.Player instances to match the active video IDs.
+  // Binds directly to the existing <iframe> DOM nodes tracked in iframeRefs,
+  // so no extra ids or document.getElementById lookups are needed.
+  useEffect(() => {
+    if (!apiReady) return;
+    const controller = syncControllerRef.current;
+    const YT = window.YT;
+    if (!controller || !YT) return;
+
+    videoIdsByIndex.forEach((videoId, index) => {
+      if (!videoId) return;
+
+      if (controller.hasPlayer(index)) {
+        if (controller.getVideoId(index) !== videoId) {
+          controller.reloadVideo(index, videoId);
+        }
+        return;
+      }
+
+      const iframeEl = iframeRefs.current[index];
+      if (!iframeEl) return;
+
+      controller.createPlayer(index, YT, iframeEl, videoId);
+    });
+
+    controller.getActiveIndices().forEach((index) => {
+      if (!videoIdsByIndex[index]) {
+        controller.unregisterPlayer(index);
+      }
+    });
+  }, [apiReady, videoIdsByIndex]);
+
+  // Selected audio index, clamped to null if that stream is no longer active
+  // (derived instead of corrected via an effect — avoids a spurious extra render)
+  const effectiveActiveAudioIndex = useMemo(() => {
+    return activeAudioIndex !== null && videoIdsByIndex[activeAudioIndex] ? activeAudioIndex : null;
+  }, [activeAudioIndex, videoIdsByIndex]);
+
+  // Keep exactly one player unmuted whenever the selection or player set changes
+  useEffect(() => {
+    if (!apiReady) return;
+    syncControllerRef.current?.setActiveAudio(effectiveActiveAudioIndex);
+  }, [apiReady, effectiveActiveAudioIndex, videoIdsByIndex]);
+
+  // Keep the controller's offsets in sync with state. adjustOffset/
+  // handleUseAsBaseline below also push directly to the controller before
+  // this effect runs, so a manual edit's resync doesn't use stale offsets —
+  // this effect is the fallback that covers every other case (restore from
+  // a shared link, stream count changes, etc.).
+  useEffect(() => {
+    syncControllerRef.current?.setOffsets(effectiveOffsets);
+  }, [effectiveOffsets]);
+
+  // Reference for drift correction: the current audio source, falling back
+  // to the first registered player so correction still runs before a
+  // selection is made
+  const getDriftReferenceIndex = useCallback((): number | null => {
+    const controller = syncControllerRef.current;
+    if (!controller) return null;
+    if (effectiveActiveAudioIndex !== null && controller.hasPlayer(effectiveActiveAudioIndex)) {
+      return effectiveActiveAudioIndex;
+    }
+    const indices = controller.getActiveIndices();
+    return indices.length > 0 ? Math.min(...indices) : null;
+  }, [effectiveActiveAudioIndex]);
+
+  useEffect(() => {
+    if (!apiReady) return;
+    const controller = syncControllerRef.current;
+    if (!controller) return;
+    controller.startDriftCorrection(getDriftReferenceIndex);
+    return () => controller.stopDriftCorrection();
+  }, [apiReady, getDriftReferenceIndex]);
+
+  // Tear down every player on unmount
+  useEffect(() => {
+    return () => {
+      syncControllerRef.current?.destroyAll();
+    };
+  }, []);
+
+  const toggleAudioSource = (index: number) => {
+    setActiveAudioIndex((prev) => (prev === index ? null : index));
+  };
+
+  // Nudge one stream's alignment offset by delta seconds (±0.1s / ±1s
+  // buttons) and seek that stream immediately by the same delta — rounded to
+  // 2 decimals so repeated 0.1 clicks don't accumulate floating-point noise
+  // like 0.30000000000000004.
+  const adjustOffset = (index: number, deltaSeconds: number) => {
+    const controller = syncControllerRef.current;
+    const current = effectiveOffsets[index] ?? 0;
+    const newOffsets = [...effectiveOffsets];
+    newOffsets[index] = Math.round((current + deltaSeconds) * 100) / 100;
+
+    controller?.setOffsets(newOffsets);
+    controller?.nudgePlayer(index, deltaSeconds);
+    setOffsets(newOffsets);
+  };
+
+  // "Use this as baseline": rebase every offset relative to this stream's
+  // current offset, so this one reads 0. This does NOT move any playhead —
+  // it only renames the zero point, so the alignment on screen is untouched.
+  const handleUseAsBaseline = (index: number) => {
+    const base = effectiveOffsets[index] ?? 0;
+    if (base === 0) return;
+    const newOffsets = effectiveOffsets.map((o) => Math.round((o - base) * 100) / 100);
+
+    syncControllerRef.current?.setOffsets(newOffsets);
+    setOffsets(newOffsets);
+  };
+
+  const handleTogglePlayAll = () => {
+    const controller = syncControllerRef.current;
+    if (!controller) return;
+    if (isPlayingAll) {
+      controller.pauseAll();
+    } else {
+      controller.playAll();
+    }
+    setIsPlayingAll((prev) => !prev);
+  };
 
   // Calculate optimal grid dimensions based on count (for bottom row in stage mode)
   const getBottomGridDimensions = (count: number): { cols: number; rows: number } => {
@@ -168,7 +334,8 @@ export default function Viewer() {
   const rowHandleRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const getEmbedUrl = (videoId: string): string => {
-    return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&enablejsapi=1&rel=0`;
+    const origin = typeof window !== "undefined" ? `&origin=${encodeURIComponent(window.location.origin)}` : "";
+    return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&enablejsapi=1&rel=0${origin}`;
   };
 
   const handleBack = () => {
@@ -181,12 +348,19 @@ export default function Viewer() {
   };
 
   const handleRefresh = () => {
-    // Reload all iframes by resetting their src
-    iframeRefs.current.forEach((iframe, index) => {
-      const url = streamUrls[index];
-      if (iframe && typeof url === "string" && url.trim()) {
-        const videoId = extractVideoId(url);
-        if (videoId) {
+    // Prefer reloading through the Player API (keeps the player instance and
+    // its sync/audio state intact) — only fall back to resetting the raw
+    // iframe src for slots whose player hasn't been created yet.
+    const controller = syncControllerRef.current;
+    streamUrls.forEach((url, index) => {
+      if (typeof url !== "string" || !url.trim()) return;
+      const videoId = extractVideoId(url);
+      if (!videoId) return;
+
+      const reloaded = controller?.reloadVideo(index, videoId) ?? false;
+      if (!reloaded) {
+        const iframe = iframeRefs.current[index];
+        if (iframe) {
           iframe.src = getEmbedUrl(videoId);
         }
       }
@@ -230,12 +404,13 @@ export default function Viewer() {
       videoIds,
       colSizes: colSizes.filter((s): s is number => typeof s === "number" && !isNaN(s) && s > 0),
       rowSizes: rowSizes.filter((s): s is number => typeof s === "number" && !isNaN(s) && s > 0),
+      offsets: offsets.filter((o): o is number => typeof o === "number" && Number.isFinite(o)),
       layout,
       stageIndex,
     };
 
     window.history.replaceState(null, "", `/viewer?data=${encodeStreamData(streamData)}`);
-  }, [streamUrls, colSizes, rowSizes, layout, stageIndex]);
+  }, [streamUrls, colSizes, rowSizes, offsets, layout, stageIndex]);
 
   // Sync URL to state whenever layout, sizes, or streams change
   useEffect(() => {
@@ -544,6 +719,14 @@ export default function Viewer() {
     return typeof resultIndex === "number" ? resultIndex : safeDisplayIndex;
   };
 
+  // "+0.30s" / "-1.00s" / "0.00s" — always 2 decimals with an explicit sign so the readout doesn't jump width as it changes
+  const formatOffset = (seconds: number): string => {
+    const safeSeconds = typeof seconds === "number" && Number.isFinite(seconds) ? seconds : 0;
+    const rounded = Math.round(safeSeconds * 100) / 100;
+    if (rounded === 0) return "0.00s";
+    return `${rounded > 0 ? "+" : ""}${rounded.toFixed(2)}s`;
+  };
+
   if (!mounted) {
     return (
       <main className="h-screen w-screen bg-black flex items-center justify-center">
@@ -625,6 +808,24 @@ export default function Viewer() {
               Reset Layout
             </button>
           )}
+          <button
+            onClick={handleTogglePlayAll}
+            disabled={!apiReady}
+            className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 disabled:opacity-40 disabled:cursor-not-allowed text-indigo-400 text-xs font-medium rounded transition-colors border border-indigo-600/30 flex items-center gap-1.5"
+            title={apiReady ? undefined : "Waiting for YouTube player to load…"}
+          >
+            {isPlayingAll ? (
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="6" y="4" width="4" height="16"></rect>
+                <rect x="14" y="4" width="4" height="16"></rect>
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+            )}
+            {isPlayingAll ? "Pause All" : "Play All"}
+          </button>
           <button
             onClick={handleRefresh}
             className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-medium rounded transition-colors border border-blue-600/30 flex items-center gap-1.5"
@@ -856,6 +1057,71 @@ export default function Viewer() {
                     </span>
                   )}
                 </div>
+
+                {/* Audio source selector — exactly one stream may be unmuted at a time */}
+                {isActive && (
+                  <button
+                    onClick={() => toggleAudioSource(originalIndex)}
+                    disabled={!apiReady}
+                    className={`absolute top-2 right-2 text-xs px-1.5 py-1 rounded transition-all drop-shadow-lg disabled:cursor-not-allowed ${
+                      effectiveActiveAudioIndex === originalIndex
+                        ? "text-green-400 opacity-100"
+                        : "text-neutral-300 opacity-50 hover:opacity-100"
+                    }`}
+                    title={
+                      effectiveActiveAudioIndex === originalIndex
+                        ? "Mute this stream"
+                        : "Make this the audio source"
+                    }
+                  >
+                    {effectiveActiveAudioIndex === originalIndex ? "🔊" : "🔇"}
+                  </button>
+                )}
+
+                {/* Manual alignment offset — nudge this stream's playhead relative to the sync reference */}
+                {isActive && (
+                  <div className="absolute bottom-2 left-2 flex items-center gap-0.5 text-[10px] text-neutral-300 opacity-50 hover:opacity-100 transition-opacity drop-shadow-lg">
+                    <button
+                      onClick={() => adjustOffset(originalIndex, -1)}
+                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      title="Shift 1 second earlier"
+                    >
+                      −1s
+                    </button>
+                    <button
+                      onClick={() => adjustOffset(originalIndex, -0.1)}
+                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      title="Shift 0.1 second earlier"
+                    >
+                      −.1
+                    </button>
+                    <span className="px-1 min-w-[3.5em] text-center tabular-nums">
+                      {formatOffset(effectiveOffsets[originalIndex] ?? 0)}
+                    </span>
+                    <button
+                      onClick={() => adjustOffset(originalIndex, 0.1)}
+                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      title="Shift 0.1 second later"
+                    >
+                      +.1
+                    </button>
+                    <button
+                      onClick={() => adjustOffset(originalIndex, 1)}
+                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      title="Shift 1 second later"
+                    >
+                      +1s
+                    </button>
+                    <button
+                      onClick={() => handleUseAsBaseline(originalIndex)}
+                      disabled={(effectiveOffsets[originalIndex] ?? 0) === 0}
+                      className="px-1 py-0.5 bg-purple-900/50 hover:bg-purple-700/70 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded"
+                      title="Use this stream's current position as the baseline (rebases every offset — doesn't move any playback)"
+                    >
+                      Base
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}

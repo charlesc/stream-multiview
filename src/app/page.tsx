@@ -69,6 +69,7 @@ export default function Home() {
       videoIds,
       colSizes: [],
       rowSizes: [],
+      offsets: [],
       layout: "grid" as const,
       stageIndex: 0,
     };
