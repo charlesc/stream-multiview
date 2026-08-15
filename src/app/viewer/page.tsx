@@ -8,6 +8,17 @@ import { SyncController, loadYouTubeIframeApi } from "@/lib/sync-controller";
 
 type LayoutType = "grid" | "stage";
 
+// "0:36" / "1:04:12" — mm:ss, or h:mm:ss past the first hour. Used for the
+// custom playback-time readout that replaces YouTube's own (see getEmbedUrl).
+function formatClockTime(seconds: number): string {
+  const safeSeconds = typeof seconds === "number" && Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  const hrs = Math.floor(safeSeconds / 3600);
+  const mins = Math.floor((safeSeconds % 3600) / 60);
+  const secs = safeSeconds % 60;
+  const paddedMins = hrs > 0 ? mins.toString().padStart(2, "0") : mins.toString();
+  return `${hrs > 0 ? `${hrs}:` : ""}${paddedMins}:${secs.toString().padStart(2, "0")}`;
+}
+
 // Parse shared data from URL on first render (avoids useSearchParams issues)
 // Always returns valid StreamData with defaults
 function parseSharedDataFromUrl(): StreamData {
@@ -25,6 +36,11 @@ export default function Viewer() {
   const [mounted, setMounted] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
   const iframeRefs = useRef<(HTMLIFrameElement | null)[]>([]);
+  // Replaces YouTube's own (now-hidden, see getEmbedUrl) time readout — written
+  // to directly on a timer rather than through React state, same reasoning as
+  // the drag-resize code below: a per-panel value ticking multiple times a
+  // second has no business going through a re-render.
+  const timeDisplayRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const hasRestored = useRef(false);
   const rafId = useRef<number | null>(null);
   const pendingMouseEvent = useRef<MouseEvent | null>(null);
@@ -216,6 +232,31 @@ export default function Viewer() {
     };
   }, []);
 
+  // Drives the custom time readout that replaces YouTube's own hidden one
+  // (see getEmbedUrl). Writes straight to the DOM via timeDisplayRefs — with
+  // up to 12 panels ticking multiple times a second, running this through
+  // React state would mean 12 re-renders a tick for a value nothing else in
+  // the component needs, the same reasoning the drag-resize code below uses.
+  useEffect(() => {
+    if (!apiReady) return;
+    const controller = syncControllerRef.current;
+    if (!controller) return;
+
+    const tick = () => {
+      videoIdsByIndex.forEach((videoId, index) => {
+        if (!videoId) return;
+        const el = timeDisplayRefs.current[index];
+        if (!el) return;
+        const time = controller.getPlaybackTime(index);
+        el.textContent = time ? `${formatClockTime(time.current)} / ${formatClockTime(time.duration)}` : "";
+      });
+    };
+
+    tick();
+    const intervalId = setInterval(tick, 500);
+    return () => clearInterval(intervalId);
+  }, [apiReady, videoIdsByIndex]);
+
   const toggleAudioSource = (index: number) => {
     setActiveAudioIndex((prev) => (prev === index ? null : index));
   };
@@ -348,15 +389,18 @@ export default function Viewer() {
 
   const getEmbedUrl = (videoId: string): string => {
     const origin = typeof window !== "undefined" ? `&origin=${encodeURIComponent(window.location.origin)}` : "";
-    return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&enablejsapi=1&rel=0${origin}`;
+    // controls=0 hides YouTube's own play/pause, scrubber, "more videos",
+    // share, and save buttons entirely — this app has its own play/pause
+    // (header), seek (offset row), and refresh controls, so the native ones
+    // are pure misclick risk with no upside. disablekb=1 closes the same
+    // gap for keyboard shortcuts landing on a focused iframe. The playback
+    // time readout that controls=0 also removes is rebuilt separately (see
+    // the per-panel time display below), since that's the one piece of
+    // information worth keeping.
+    return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&enablejsapi=1&rel=0&controls=0&disablekb=1${origin}`;
   };
 
   const handleBack = () => {
-    router.push("/");
-  };
-
-  const handleClear = () => {
-    setStreamUrls(Array(streamCount).fill(""));
     router.push("/");
   };
 
@@ -891,8 +935,8 @@ export default function Viewer() {
                 <div className="text-[10px] font-medium text-neutral-400 uppercase tracking-wide mb-1.5">
                   Playback speed
                 </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {[0.5, 0.75, 1].map((rate) => (
+                <div className="grid grid-cols-4 gap-1.5">
+                  {[0.5, 0.75, 1, 1.5].map((rate) => (
                     <button
                       key={rate}
                       onClick={() => handleSetPlaybackRate(rate)}
@@ -987,12 +1031,6 @@ export default function Viewer() {
             className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-medium rounded transition-colors"
           >
             Edit
-          </button>
-          <button
-            onClick={handleClear}
-            className="px-3 py-1.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-xs font-medium rounded transition-colors border border-red-600/30"
-          >
-            Clear
           </button>
         </div>
       </header>
@@ -1161,36 +1199,58 @@ export default function Viewer() {
                   </button>
                 )}
 
+                {/* Custom playback-time readout — YouTube's own is hidden (controls=0 in getEmbedUrl) to remove misclick-prone controls */}
+                {isActive && (
+                  <span
+                    ref={(el) => { timeDisplayRefs.current[originalIndex] = el; }}
+                    className="absolute bottom-2 right-2 text-xs text-neutral-300 tabular-nums drop-shadow-lg pointer-events-none"
+                  />
+                )}
+
                 {/* Manual alignment offset — nudge this stream's playhead relative to the sync reference */}
                 {isActive && (
-                  <div className="absolute bottom-2 left-2 flex items-center gap-0.5 text-[10px] text-neutral-300 opacity-50 hover:opacity-100 transition-opacity drop-shadow-lg">
+                  <div className="absolute bottom-2 left-2 flex items-center gap-1 text-neutral-300 opacity-60 hover:opacity-100 transition-opacity drop-shadow-lg">
                     <button
                       onClick={() => adjustOffset(originalIndex, -1)}
-                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
                       title="Shift 1 second earlier"
                     >
                       −1s
                     </button>
                     <button
                       onClick={() => adjustOffset(originalIndex, -0.1)}
-                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
                       title="Shift 0.1 second earlier"
                     >
                       −.1
                     </button>
-                    <span className="px-1 min-w-[3.5em] text-center tabular-nums">
+                    <button
+                      onClick={() => adjustOffset(originalIndex, -0.01)}
+                      className="px-1 py-1 text-[10px] bg-black/50 hover:bg-black/70 rounded"
+                      title="Shift 0.01 second earlier"
+                    >
+                      −.01
+                    </button>
+                    <span className="px-1 min-w-[3.5em] text-center text-[10px] tabular-nums">
                       {formatOffset(effectiveOffsets[originalIndex] ?? 0)}
                     </span>
                     <button
+                      onClick={() => adjustOffset(originalIndex, 0.01)}
+                      className="px-1 py-1 text-[10px] bg-black/50 hover:bg-black/70 rounded"
+                      title="Shift 0.01 second later"
+                    >
+                      +.01
+                    </button>
+                    <button
                       onClick={() => adjustOffset(originalIndex, 0.1)}
-                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
                       title="Shift 0.1 second later"
                     >
                       +.1
                     </button>
                     <button
                       onClick={() => adjustOffset(originalIndex, 1)}
-                      className="px-1 py-0.5 bg-black/50 hover:bg-black/70 rounded"
+                      className="px-2.5 py-1.5 text-xs bg-black/50 hover:bg-black/70 rounded"
                       title="Shift 1 second later"
                     >
                       +1s
@@ -1198,7 +1258,7 @@ export default function Viewer() {
                     <button
                       onClick={() => handleUseAsBaseline(originalIndex)}
                       disabled={(effectiveOffsets[originalIndex] ?? 0) === 0}
-                      className="px-1 py-0.5 bg-purple-900/50 hover:bg-purple-700/70 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded"
+                      className="px-1.5 py-1.5 text-[10px] bg-purple-900/50 hover:bg-purple-700/70 disabled:opacity-40 disabled:cursor-not-allowed text-purple-300 rounded"
                       title="Use this stream's current position as the baseline (rebases every offset — doesn't move any playback)"
                     >
                       Base

@@ -12,6 +12,7 @@ export interface YTPlayer {
   pauseVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
   getCurrentTime(): number;
+  getDuration(): number;
   getPlayerState(): YTPlayerState;
   mute(): void;
   unMute(): void;
@@ -164,6 +165,23 @@ export class SyncController {
 
   getActiveIndices(): number[] {
     return Array.from(this.players.keys());
+  }
+
+  /**
+   * Current playhead position and total duration in seconds, or null if the
+   * player isn't registered/ready. Combined into one call (rather than
+   * separate getCurrentTime/getDuration methods) since callers polling this
+   * for a UI readout want both every tick anyway.
+   */
+  getPlaybackTime(index: number): { current: number; duration: number } | null {
+    const entry = this.players.get(index);
+    if (!entry?.ready) return null;
+    try {
+      return { current: entry.player.getCurrentTime(), duration: entry.player.getDuration() };
+    } catch (error) {
+      console.error("[sync-controller] getPlaybackTime failed:", error);
+      return null;
+    }
   }
 
   /** Loads a new video into an already-registered, ready player without recreating it. Returns false if it couldn't (caller should fall back). */
