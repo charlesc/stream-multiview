@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Stream MultiView — a Next.js 16 / React 19 app that lets a user watch up to 12 YouTube live streams at once in a security-camera-style grid, with draggable panel resizing and a "Stage" (spotlight + grid) layout mode. There is no backend, database, or API route — everything runs client-side; the only "server" logic is Next.js rendering the two pages.
 
+> A local-only automatic audio-sync feature (downloads stream audio, detects alignment via cross-correlation) exists on branch `feat/auto-audio-sync-worker` and is **intentionally never merged here** — it needs a separate Python process (yt-dlp/ffmpeg/numpy/scipy) that can't run in this app's deployment target, and running it anywhere but the user's own machine defeats the point (see that branch's CLAUDE.md/`worker/README.md` for why). `main` is the actively-developed app; that branch is a standing, occasionally-rebased add-on for local use only.
+
 ## Commands
 
 Package manager is **bun** — do not use npm or yarn.
@@ -57,7 +59,7 @@ Audio is single-source by design (`activeAudioIndex` state + `SyncController.set
 
 `offsets` (state in the viewer, padded to the active count via `effectiveOffsets`) records how many seconds each original stream index should lead the drift-correction reference by — used when streams started recording at different real times and need manual alignment. Two distinct operations, easy to conflate:
 
-- **`adjustOffset` (±0.1s/±1s buttons)** updates that index's entry in `offsets` *and* calls `SyncController.nudgePlayer(index, delta)`, which seeks *only that player*, by `delta`, from its own current position — deliberately not relative to whatever the current drift-correction reference is. This is what makes clicking "+1s" on a panel always visibly move that exact panel, even when it happens to currently be the reference itself (seeking a player relative to itself is a no-op, which would silently swallow the click).
+- **`adjustOffset` (±0.01s/±0.1s/±1s buttons)** updates that index's entry in `offsets` *and* calls `SyncController.nudgePlayer(index, delta)`, which seeks *only that player*, by `delta`, from its own current position — deliberately not relative to whatever the current drift-correction reference is. This is what makes clicking "+1s" on a panel always visibly move that exact panel, even when it happens to currently be the reference itself (seeking a player relative to itself is a no-op, which would silently swallow the click). The ±0.01s buttons are deliberately smaller/lower-emphasis than ±0.1s/±1s in the JSX — they're for occasional fine correction, not the primary click target, which is why only the latter two got sized up for easier clicking.
 - **"Base" (`handleUseAsBaseline`)** rebases every stream's offset by subtracting the clicked stream's current offset from all of them, so that one reads `0.00s`. It intentionally seeks nothing — a rebase only renames which stream is "the zero point"; the on-screen alignment before and after is identical. If you're debugging "Base did nothing to the video," that's correct, not a bug.
 
 Both paths call `SyncController.setOffsets(effectiveOffsets)` directly (not just through the `useEffect` that also mirrors `effectiveOffsets` into the controller) so the controller's next drift-correction tick sees the edit immediately rather than one render late.
@@ -67,7 +69,13 @@ Both paths call `SyncController.setOffsets(effectiveOffsets)` directly (not just
 The header's "Speed" dropdown (`showPlaybackMenu`) holds two unrelated-but-grouped controls, both applied to every stream at once via `SyncController`:
 
 - **`handleSeekAll` → `SyncController.seekAllBy(delta)`**: ±1s/±5s, each player seeks from its own current position. Unlike per-panel offset nudges, this doesn't touch `offsets` — it's a temporary joint skip (e.g. "everyone skip the intro"), not a realignment.
-- **`handleSetPlaybackRate` → `SyncController.setPlaybackRateAll(rate)`**: 0.5x/0.75x/1x. The controller remembers the chosen rate (`private playbackRate`) and reapplies it whenever a player becomes ready (`createPlayer`'s `onReady`) or reloads a video (`reloadVideo`, i.e. the Refresh button) — both operations otherwise silently reset a player back to 1x. If you add another way to (re)create or reload a player, reapply `playbackRate` there too. YouTube only honors values from `player.getAvailablePlaybackRates()` (typically 0.25–2 in fixed steps); passing an arbitrary rate is silently ignored by the API rather than erroring.
+- **`handleSetPlaybackRate` → `SyncController.setPlaybackRateAll(rate)`**: 0.5x/0.75x/1x/1.5x. The controller remembers the chosen rate (`private playbackRate`) and reapplies it whenever a player becomes ready (`createPlayer`'s `onReady`) or reloads a video (`reloadVideo`, i.e. the Refresh button) — both operations otherwise silently reset a player back to 1x. If you add another way to (re)create or reload a player, reapply `playbackRate` there too. YouTube only honors values from `player.getAvailablePlaybackRates()` (typically 0.25–2 in fixed steps); passing an arbitrary rate is silently ignored by the API rather than erroring.
+
+### YouTube's native controls are deliberately hidden
+
+`getEmbedUrl()` sets `controls=0&disablekb=1` — every panel's play/pause, scrubber, "more videos", share, and save/collect buttons are gone on purpose, to eliminate misclicks on a grid of up to 12 iframes sitting right next to each other; this app already has its own play/pause (header), seek (offset row/global seek), and refresh. Removing `controls=0` un-hides all of that as a side effect, not just the one button you're trying to bring back — there's no YouTube param for partial control visibility.
+
+The one piece of native UI worth keeping — the current-time/duration readout — is rebuilt separately as plain text (`timeDisplayRefs`, formatted by the module-level `formatClockTime`), driven by a `setInterval` polling `SyncController.getPlaybackTime(index)` every 500ms and writing straight to the DOM, not through React state — with up to 12 panels ticking multiple times a second, routing that through re-renders would cost real performance for a value nothing else in the component reads, the same reasoning `processMouseMove`'s direct DOM writes use during drag-resize.
 
 ## Conventions
 
