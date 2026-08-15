@@ -6,6 +6,8 @@ export interface StreamData {
   rowSizes: number[];
   layout: "grid" | "stage";
   stageIndex: number;
+  /** Seconds each stream's playhead should lead the sync reference by (manual alignment offset). Missing/extra entries relative to videoIds are the caller's responsibility to pad/trim — this module only guarantees finite numbers. */
+  offsets: number[];
 }
 
 /**
@@ -37,6 +39,7 @@ export function encodeStreamData(data: StreamData): string {
   const safeVideoIds = Array.isArray(data.videoIds) ? data.videoIds : [];
   const safeColSizes = Array.isArray(data.colSizes) ? data.colSizes : [];
   const safeRowSizes = Array.isArray(data.rowSizes) ? data.rowSizes : [];
+  const safeOffsets = Array.isArray(data.offsets) ? data.offsets : [];
   const safeLayout = data.layout === "stage" ? "stage" : "grid";
   const safeStageIndex = typeof data.stageIndex === "number" && !isNaN(data.stageIndex)
     ? Math.max(0, data.stageIndex)
@@ -53,6 +56,8 @@ export function encodeStreamData(data: StreamData): string {
     rowSizes: safeRowSizes.filter((s): s is number =>
       typeof s === "number" && !isNaN(s) && s > 0
     ),
+    // Offsets may be negative (a stream can lag or lead the reference), unlike colSizes/rowSizes
+    offsets: safeOffsets.filter((o): o is number => typeof o === "number" && Number.isFinite(o)),
     layout: safeLayout,
     stageIndex: safeStageIndex,
   };
@@ -79,6 +84,7 @@ export function decodeStreamData(encoded: string): StreamData {
     videoIds: [],
     colSizes: [],
     rowSizes: [],
+    offsets: [],
     layout: "grid",
     stageIndex: 0,
   };
@@ -113,6 +119,12 @@ export function decodeStreamData(encoded: string): StreamData {
         : [],
       rowSizes: Array.isArray(parsed.rowSizes)
         ? parsed.rowSizes.filter((s: unknown): s is number => typeof s === "number" && !isNaN(s) && s > 0)
+        : [],
+      // Absent on links shared before this field existed — an empty array here
+      // is the correct "no offsets" case, not an error; callers pad missing
+      // per-stream entries with 0.
+      offsets: Array.isArray(parsed.offsets)
+        ? parsed.offsets.filter((o: unknown): o is number => typeof o === "number" && Number.isFinite(o))
         : [],
       layout: parsed.layout === "stage" ? "stage" : "grid",
       stageIndex: typeof parsed.stageIndex === "number" && !isNaN(parsed.stageIndex)
