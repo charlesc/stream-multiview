@@ -5,11 +5,23 @@ import { useStreams } from "@/lib/stream-context";
 import { useRouter } from "next/navigation";
 import { extractVideoId, encodeStreamData } from "@/lib/share-utils";
 
+// Default test streams — prefilled on first visit (no streams configured yet)
+// so testing doesn't require re-pasting URLs every time.
+const DEFAULT_TEST_URLS = [
+  "https://youtube.com/embed/duuqEo1r8rU",
+  "https://youtube.com/embed/o7CWg-fqNNY",
+  "https://youtube.com/embed/sImpn2l5eSM",
+  "https://youtube.com/embed/KQDQVpbxzHs",
+];
+
 export default function Home() {
   const { streamCount, setStreamCount, streamUrls, setStreamUrls } = useStreams();
-  const [tempCount, setTempCount] = useState(streamCount);
+  const hasExistingStreams = streamUrls.length > 0;
+  const [tempCount, setTempCount] = useState(
+    hasExistingStreams ? streamCount : DEFAULT_TEST_URLS.length
+  );
   const [tempUrls, setTempUrls] = useState<string[]>(
-    streamUrls.length > 0 ? streamUrls : Array(1).fill("")
+    hasExistingStreams ? streamUrls : [...DEFAULT_TEST_URLS]
   );
   const router = useRouter();
 
