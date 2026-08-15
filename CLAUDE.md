@@ -62,6 +62,13 @@ Audio is single-source by design (`activeAudioIndex` state + `SyncController.set
 
 Both paths call `SyncController.setOffsets(effectiveOffsets)` directly (not just through the `useEffect` that also mirrors `effectiveOffsets` into the controller) so the controller's next drift-correction tick sees the edit immediately rather than one render late.
 
+### Global seek + playback speed
+
+The header's "Speed" dropdown (`showPlaybackMenu`) holds two unrelated-but-grouped controls, both applied to every stream at once via `SyncController`:
+
+- **`handleSeekAll` → `SyncController.seekAllBy(delta)`**: ±1s/±5s, each player seeks from its own current position. Unlike per-panel offset nudges, this doesn't touch `offsets` — it's a temporary joint skip (e.g. "everyone skip the intro"), not a realignment.
+- **`handleSetPlaybackRate` → `SyncController.setPlaybackRateAll(rate)`**: 0.5x/0.75x/1x. The controller remembers the chosen rate (`private playbackRate`) and reapplies it whenever a player becomes ready (`createPlayer`'s `onReady`) or reloads a video (`reloadVideo`, i.e. the Refresh button) — both operations otherwise silently reset a player back to 1x. If you add another way to (re)create or reload a player, reapply `playbackRate` there too. YouTube only honors values from `player.getAvailablePlaybackRates()` (typically 0.25–2 in fixed steps); passing an arbitrary rate is silently ignored by the API rather than erroring.
+
 ## Conventions
 
 - Path alias `@/*` → `src/*` (see `tsconfig.json`).
